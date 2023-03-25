@@ -1,0 +1,169 @@
+---
+title: "XGB Model"
+author: "Aryan Mistry"
+date: "2023-03-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidymodels)
+library(tidyverse)
+library(dplyr)
+
+
+nancy_df <- read.csv("Nancy_cookie_device4.csv")
+nicole_df <- read.csv("df_unique_orders.csv")
+marieth_df <- read.csv("Marieth_features_all.csv")
+extended_df <- read.csv("df_all_unique.csv")
+
+target <- read.csv("Targets_Preliminary_Rank4.csv")
+
+target <- target %>% select("cookieid", "category")
+
+```
+
+```{r}
+dframe <- merge(nancy_df, nicole_df, by = "cookieid")
+dframe <- merge(dframe, marieth_df, by = "cookieid")
+dframe <- merge(dframe, target, by = "cookieid")
+dframe <- merge(dframe, extended_df, by = "cookieid")
+```
+
+```{r}
+dframe <- dframe %>% select("cookieid", "devicetype", "promocode",
+                            "productlist", "firsthitpagename",
+                            "mean.visitpagenum.", "evar83", "evar28",
+                            "prop29", "state", "myaccountengagement", "category")
+dframe <- dframe %>% distinct(cookieid, .keep_all = TRUE)
+```
+
+
+```{r}
+dframe <- dframe %>% mutate(used_promo = as.numeric(!(promocode == "")))
+dframe <- dframe %>% mutate_at(c('evar28'), ~na_if(., ''))
+dframe <- dframe %>% mutate_at(c('prop29'), ~na_if(., ''))
+dframe <- dframe %>% filter(firsthitpagename != "")
+dframe <- dframe %>% mutate(evar28 = ifelse(is.na(evar28), "None", evar28))
+dframe <- dframe %>% mutate(prop29 = ifelse(is.na(prop29), "None", prop29))
+```
+
+
+```{r}
+predictors <- dframe %>% select(-"cookieid", -"promocode", -"evar83", -"productlist")
+predictors$category <- as.factor(predictors$category)
+```
+
+```{r}
+predictors$category<- as.factor(predictors$category)
+predictors$devicetype <- as.factor(predictors$devicetype)
+predictors$firsthitpagename <- as.factor(predictors$firsthitpagename)
+predictors$evar28 <- as.factor(predictors$evar28)
+predictors$prop29 <- as.factor(predictors$prop29)
+predictors$state <- as.factor(predictors$state)
+```                              
+
+
+
+```{r}
+##Train-Test Split
+
+set.seed(123)
+
+#Use 75% of dataset as training set and remaining 25% as testing set
+data_split <- initial_split(predictors, 
+                           prop = 3/4)
+
+train_data <- training(data_split) 
+test_data <- testing(data_split)
+```
+
+
+```{r}
+df_recipe <- recipe(category ~ ., data = train) %>%
+  step_center(mean.visitpagenum.) %>%
+  step_scale(mean.visitpagenum.) %>% 
+  prep()
+
+df_juiced <- juice(df_recipe)
+```
+
+```{r}
+df_folds <- vfold_cv(df_juiced, 5)
+```
+
+
+```{r}
+xgb_spec <- boost_tree(
+  trees = tune(), 
+  tree_depth = tune(), min_n = tune(), 
+  loss_reduction = tune(),                     ## first three: model complexity
+  sample_size = tune(), mtry = tune(),         ## randomness
+  learn_rate = tune(),                         ## step size
+) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification")
+
+xgb_spec
+```
+
+```{r}
+xgb_grid <- grid_latin_hypercube(
+  trees(),
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), test_data),
+  learn_rate(),
+  size = 30
+)
+```
+
+```{r}
+xgb_wf <- workflow() %>%
+  add_formula(category ~ .) %>%
+  add_model(xgb_spec)
+
+xgb_wf
+```
+
+
+
+```{r}
+#Model training
+library(xgboost)
+doParallel::registerDoParallel()
+
+set.seed(234)
+xgb_res <- tune_grid(
+  xgb_wf,
+  resamples = df_folds,
+  grid = xgb_grid,
+  control = control_grid(save_pred = TRUE)
+)
+
+xgb_res
+```
+
+```{r}
+collect_metrics(xgb_res)
+```
+
+```{r}
+#Evaluate on the test set
+last_fit_xgb <- last_fit(xgb_wf, 
+                        split = data_split,
+                        metrics = metric_set(
+                          accuracy, roc_auc))
+                        
+```
+
+```{r}
+collect_metrics(last_fit_xgb)
+```
+
+
