@@ -1,0 +1,402 @@
+---
+title: "stats101c_final"
+author: "Aryan Mistry"
+date: "7/19/2022"
+output: html_document
+---
+
+
+```{r}
+library(tidymodels)
+library(tidyverse)
+library(dplyr)
+
+
+nancy_df <- read.csv("Nancy_cookie_device4.csv")
+nicole_df <- read.csv("df_unique_orders.csv")
+marieth_df <- read.csv("Marieth_features_all.csv")
+extended_df <- read.csv("df_all_unique.csv")
+pl_df <- read.csv("Marieth_productlist.csv")
+
+target <- read.csv("Targets_Preliminary_Rank4.csv")
+
+target <- target %>% select("cookieid", "category")
+
+```
+
+
+
+```{r}
+dframe <- merge(nancy_df, nicole_df, by = "cookieid")
+dframe <- merge(dframe, marieth_df, by = "cookieid")
+dframe <- merge(dframe, target, by = "cookieid")
+dframe <- merge(dframe, extended_df, by = "cookieid")
+dframe <- merge(dframe, pl_df, by = "cookieid")
+```
+
+```{r}
+dframe <- dframe %>% select("cookieid", "devicetype", "productlist_first", "promocode",
+                            "firsthitpagename",
+                            "mean.visitpagenum.", "post_evar7", "evar83", "evar28",
+                            "prop29", "state", "myaccountengagement", "category")
+dframe <- dframe %>% distinct(cookieid, .keep_all = TRUE)
+
+head(dframe)
+```
+
+
+```{r}
+dframe <- dframe %>% mutate(used_promo = as.numeric(!(promocode == "")))
+dframe <- dframe %>% mutate_at(c('evar28'), ~na_if(., ''))
+dframe <- dframe %>% mutate_at(c('prop29'), ~na_if(., ''))
+dframe <- dframe %>% filter(firsthitpagename != "")
+dframe <- dframe %>% mutate(evar28 = ifelse(is.na(evar28), "None", evar28))
+dframe <- dframe %>% mutate(prop29 = ifelse(is.na(prop29), "None", prop29))
+```
+
+
+```{r}
+predictors <- dframe %>% select(-"cookieid", -"promocode", -"evar83")
+predictors$category <- as.factor(predictors$category)
+head(predictors, 10)
+```
+
+
+```{r}
+predictors$category<- as.factor(predictors$category)
+predictors$devicetype <- as.factor(predictors$devicetype)
+predictors$firsthitpagename <- as.factor(predictors$firsthitpagename)
+predictors$evar28 <- as.factor(predictors$evar28)
+predictors$prop29 <- as.factor(predictors$prop29)
+predictors$state <- as.factor(predictors$state)
+```                              
+
+```{r}
+head(dframe, 5)
+```
+
+
+```{r}
+#Choose how many rows to use to make the model run quicker
+predictors <- predictors[1:5000, ]
+```
+
+
+
+
+```{r}
+##Train-Test Split
+
+set.seed(123)
+
+#Use 75% of dataset as training set and remaining 25% as testing set
+data_split <- initial_split(predictors, 
+                           prop = 3/4)
+
+train_data <- training(data_split) 
+test_data <- testing(data_split)
+```
+
+```{r}
+head(test_data)
+```
+
+
+```{r}
+# This preprocesses the data
+df_recipe <- recipe(category ~ ., data = train_data) %>%
+  step_other(state) %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_center(mean.visitpagenum.) %>%
+  step_scale(mean.visitpagenum.) %>% 
+  step_center(myaccountengagement) %>%
+  step_scale(myaccountengagement) %>% 
+  step_novel(all_nominal(), -all_outcomes()) %>% 
+  prep()
+
+# This just allows you to see the preprocessed data
+juiced <- juice(df_recipe)
+
+```
+
+```{r}
+head(juiced)
+```
+
+
+
+```{r}
+df_folds <- vfold_cv(train_data, 2)
+```
+
+
+```{r}
+# Logistic regression that only predicts two categories
+logreg <- logistic_reg(mode = "classification",
+                       engine = "glm")
+
+lr_wf <- workflow() %>%
+  add_recipe(df_recipe) %>%
+  add_model(logreg)
+```
+
+```{r}
+lfit <- lr_wf %>%
+  fit(data = train_data)
+```
+
+
+```{r}
+# This outputs the predictions of logistic regression
+lfit_preds <- predict(lfit, new_data = test_data)
+lfit_preds
+```
+
+```{r}
+some_metrics <- metric_set(accuracy)
+
+# Get predictions on the testing set
+augment(lfit, new_data = test_data) %>% 
+  # Evaluate the metric set
+some_metrics(category, preds, estimate = .pred_class)
+```
+
+```{r}
+knn_final <- nearest_neighbor(neighbors = 47,
+                         weight_func = "rectangular",
+                         dist_power = 1.0898139) %>%  
+  set_engine("kknn") %>% 
+  set_mode("classification")
+
+knn_wf2 <- workflow() %>%
+  add_recipe(df_recipe) %>%
+  add_model(knn_final)
+```
+
+```{r}
+knn_fit_final <- knn_wf2 %>%
+  fit(data = train_data)
+```
+
+```{r}
+kfinal_preds <- predict(knn_fit_final, new_data = test_data)
+kfinal_preds
+```
+
+
+
+```{r}
+#Low accuracy KNN (Probably because it only predicts one or two categories, instead of all four)
+library(kknn)
+knn1 <- nearest_neighbor(neighbors = tune("K"),
+                         weight_func = tune(),
+                         dist_power = tune()) %>%  
+  set_engine("kknn") %>% 
+  set_mode("classification")
+
+knn_wf <- workflow() %>%
+  add_recipe(df_recipe) %>%
+  add_model(knn1)
+```
+
+```{r}
+knn_set <-
+  extract_parameter_set_dials(knn_wf) %>%
+  update(K = neighbors(c(1, 100)))
+```
+
+```{r}
+set.seed(123)
+
+knn_grid <-
+  knn_set %>%
+  grid_max_entropy(size = 50)
+```
+
+```{r}
+knn_grid_search <-
+  tune_grid(
+    knn_wf,
+    resamples = df_folds,
+    grid = knn_grid
+  )
+```
+
+```{r}
+collect_metrics(knn_grid_search)
+```
+
+```{r}
+knn_grid_search
+```
+
+
+```{r}
+roc_auc(m)
+```
+
+
+
+```{r}
+show_best(knn_grid_search, "accuracy", 10)
+show_best(knn_grid_search, "roc_auc")
+```
+
+```{r}
+final_knn <- finalize_workflow(knn_wf, select_best(knn_grid_search, "accuracy"))
+```
+
+```{r}
+knn_grid_search %>%
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  select(mean, K) %>%
+  pivot_longer(K,
+               values_to = "value",
+               names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(alpha = 5, show.legend = FALSE, size = 2.8, color = "#b72122") +
+  theme(axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15),
+        axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15)) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = "K", y = "Accuracy")
+```
+
+
+
+
+```{r}
+knn_fit <- knn_wf %>% 
+    fit(data = train_data)
+```
+
+
+```{r}
+knnfit_preds <- predict(knn_grid_search, new_data = test_data)
+preds <- knnfit_preds$.pred_class
+```
+
+
+```{r}
+some_metrics <- metric_set(accuracy )
+
+# Get predictions on the testing set
+augment(knn_fit, new_data = test_data) %>% 
+  # Evaluate the metric set
+some_metrics(category, preds, estimate = .pred_class)
+```
+
+```{r}
+library(vip)
+
+final_knn %>%
+  fit(data = train_data) %>%
+  pull_workflow_fit() %>%
+  vip(geom = "point")
+```
+
+
+
+```{r}
+#Random forest that runs for eternity
+rf_spec <- 
+    rand_forest(trees = tune(), min_n = tune(), mtry = 3) %>% 
+    set_mode("classification") %>% 
+    set_engine("ranger")
+
+rf_wf <- workflow() %>%
+  add_recipe(df_recipe) %>%
+  add_model(rf_spec)
+```
+
+```{r}
+tune_rf <- tune_grid(
+  rf_wf,
+  resamples = df_folds,
+  grid = 20
+)
+
+tune_rf
+```
+
+
+```{r}
+collect_metrics(tune_rf)
+```
+
+
+```{r}
+show_notes(.Last.tune.result)
+```
+
+
+
+```{r}
+#XGBoost
+xgb_spec <- boost_tree(
+  trees = tune(), 
+  tree_depth = tune(), min_n = tune(), 
+  loss_reduction = tune(),                     ## first three: model complexity
+  sample_size = tune(), mtry = tune(),         ## randomness
+  learn_rate = tune(),                         ## step size
+) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification")
+
+xgb_spec
+```
+```{r}
+xgb_grid <- grid_latin_hypercube(
+  trees(),
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), train_data),
+  learn_rate(),
+  size = 10
+)
+```
+
+```{r}
+xgb_wf <- workflow() %>%
+  add_formula(category ~ .) %>%
+  add_model(xgb_spec)
+
+xgb_wf
+```
+
+
+```{r}
+library(xgboost)
+doParallel::registerDoParallel()
+
+set.seed(234)
+xgb_res <- tune_grid(
+  xgb_wf,
+  resamples = df_folds,
+  grid = xgb_grid,
+  control = control_grid(save_pred = TRUE)
+)
+
+xgb_res
+```
+
+
+```{r}
+collect_metrics(xgb_res)
+```
+
+
+```{r}
+best_accuracy <- show_best(xgb_res, "accuracy", 1)
+best_auc <- show_best(xgb_res, "roc_auc", 1)
+
+best_accuracy
+```
+
+
+
